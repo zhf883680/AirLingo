@@ -195,7 +195,7 @@ private struct EmptyState: View {
 struct AboutPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Panel(title: "AirLingo 1.0.0", subtitle: "Trancy Air 的独立复刻实现，原生 SwiftUI，本地优先。") {
+            Panel(title: "AirLingo \(AppInfo.version)", subtitle: "Trancy Air 的独立复刻实现，原生 SwiftUI，本地优先。") {
                 VStack(alignment: .leading, spacing: 10) {
                     infoRow("技术栈", "SwiftUI + AppKit + Carbon 热键 + ScreenCaptureKit + Vision")
                     Divider().overlay(Theme.line)

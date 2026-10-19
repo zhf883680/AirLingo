@@ -358,7 +358,7 @@ struct EnginesPane: View {
             }
 
             if profile.kind == .apple {
-                AppleEngineDetail(target: store.config.nativeLang)
+                AppleEngineDetail(native: store.config.nativeLang, learn: store.config.learnLang)
             } else if profile.kind != .google {
                 VStack(alignment: .leading, spacing: 8) {
                     fieldRow(label: "接口地址", text: engine.baseURL, placeholder: profile.kind.defaultBaseURL)
@@ -441,9 +441,11 @@ struct EnginesPane: View {
 // MARK: - Apple 系统翻译状态
 
 private struct AppleEngineDetail: View {
-    let target: String
+    let native: String
+    let learn: String
 
     @State private var status: AppleLanguageStatus = .unknown
+    @State private var missing: [String] = []
     @State private var busy = false
     @State private var message: String?
 
@@ -476,6 +478,19 @@ private struct AppleEngineDetail: View {
                 .disabled(busy)
 
                 Button {
+                    Task { await recheck() }
+                } label: {
+                    Text("重新检测")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.fgSoft)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.white.opacity(0.04)))
+                }
+                .buttonStyle(.plain)
+                .disabled(busy)
+
+                Button {
                     if #available(macOS 15.0, *) {
                         AppleTranslateService.shared.openLanguageSettings()
                     }
@@ -502,7 +517,7 @@ private struct AppleEngineDetail: View {
                 .foregroundStyle(Theme.fgSoft.opacity(0.85))
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .task(id: target) { await refresh() }
+        .task(id: native + learn) { await refresh() }
     }
 
     private var dotColor: Color {
@@ -515,13 +530,14 @@ private struct AppleEngineDetail: View {
     }
 
     private var statusText: String {
+        let pair = "\(AppLanguage.name(for: native)) ⇄ \(AppLanguage.name(for: learn))"
         switch status {
         case .installed:
-            return "\(AppLanguage.name(for: target)) 语言包已就绪"
+            return "\(pair) 双向语言包已就绪"
         case .supported:
-            return "\(AppLanguage.name(for: target)) 语言包未安装"
+            return missing.isEmpty ? "\(pair) 语言包未安装" : "\(pair) 还缺\(missing.joined(separator: "、"))的语言包"
         case .unsupported:
-            return "当前系统暂不支持该语言对"
+            return "当前系统暂不支持\(pair)"
         case .unknown:
             return "正在检查系统语言包…"
         }
@@ -532,7 +548,37 @@ private struct AppleEngineDetail: View {
             status = .unsupported
             return
         }
-        status = await AppleTranslateService.shared.status(for: nil, target: target)
+        let service = AppleTranslateService.shared
+        let forward = await service.status(from: native, to: learn)    // 母语 → 学习语言
+        let backward = await service.status(from: learn, to: native)   // 学习语言 → 母语
+
+        var lacking: [String] = []
+        if forward != .installed { lacking.append(AppLanguage.name(for: learn)) }
+        if backward != .installed { lacking.append(AppLanguage.name(for: native)) }
+        missing = Array(NSOrderedSet(array: lacking)) as? [String] ?? lacking
+
+        if forward == .unsupported || backward == .unsupported {
+            status = .unsupported
+        } else if !lacking.isEmpty {
+            status = .supported
+        } else {
+            status = .installed
+        }
+    }
+
+    /// 用户装完语言包后不用重启应用：丢掉旧的翻译会话再查一次。
+    private func recheck() async {
+        guard #available(macOS 15.0, *) else { return }
+        busy = true
+        message = nil
+        defer { busy = false }
+        AppleTranslateService.shared.resetHost()
+        await refresh()
+        if status == .installed {
+            message = "✓ 语言包已就绪，可以直接使用"
+        } else {
+            message = "系统仍未报告就绪。点「安装语言包」让系统补装，或重启 AirLingo 后再看"
+        }
     }
 
     private func prepare() async {
@@ -543,17 +589,21 @@ private struct AppleEngineDetail: View {
         busy = true
         message = nil
         defer { busy = false }
-        do {
-            try await AppleTranslateService.shared.prepare(source: nil, target: target)
-            await refresh()
-            if status == .installed {
-                message = "✓ 语言包已准备好，可以直接使用"
-            } else {
-                message = "系统没有自动安装，请到「系统设置 › 通用 › 语言与地区 › 翻译语言」手动添加"
+        var lastError: Error?
+        for pair in [(native, learn), (learn, native)] {
+            do {
+                try await AppleTranslateService.shared.prepare(source: pair.0, target: pair.1)
+            } catch {
+                lastError = error
             }
-        } catch {
-            await refresh()
-            message = "✗ \(error.localizedDescription)"
+        }
+        await refresh()
+        if status == .installed {
+            message = "✓ 语言包已准备好，可以直接使用"
+        } else if let lastError {
+            message = "✗ \(lastError.localizedDescription)"
+        } else {
+            message = "系统没有自动安装，请到「系统设置 › 通用 › 语言与地区 › 翻译语言」手动添加"
         }
     }
 }

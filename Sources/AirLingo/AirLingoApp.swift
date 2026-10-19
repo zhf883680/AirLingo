@@ -39,7 +39,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if index + 3 < CommandLine.arguments.count, let value = Double(CommandLine.arguments[index + 3]) {
                 height = CGFloat(value)
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            // 延到 1.4 秒：让页面里的异步状态检测（语言包、权限）跑完再截图
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
                 MainActor.assumeIsolated {
                     Self.renderSnapshot(to: path, height: height)
                 }
@@ -350,6 +351,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // 命令行自检：AirLingo --popup-apple-test <目录> —— 弹窗 + Apple 引擎真实翻译
+        if let index = CommandLine.arguments.firstIndex(of: "--popup-apple-test"),
+           index + 1 < CommandLine.arguments.count {
+            let dir = CommandLine.arguments[index + 1]
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let anchor = CGPoint(x: 700, y: 700)
+            Task { @MainActor in
+                PopupController.shared.show(source: "这是一段测试文字，用来检查翻译功能。",
+                                            engineID: "apple",
+                                            mode: .translate,
+                                            anchor: anchor)
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                PopupController.shared.debugReport(to: dir)
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                NSApp.terminate(nil)
+            }
+            return
+        }
+
         // 命令行自检：AirLingo --popup-live-test <目录>
         if let index = CommandLine.arguments.firstIndex(of: "--popup-live-test"),
            index + 1 < CommandLine.arguments.count {
@@ -378,6 +398,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 MainActor.assumeIsolated {
                     Self.renderPopupSnapshot(to: path, long: long)
                 }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+
+        // 命令行自检：AirLingo --apple-pairs [日志路径] —— 打印各语言对的语言包状态
+        if CommandLine.arguments.contains("--apple-pairs") {
+            let logPath = "/tmp/airlingo-apple-pairs.log"
+            FileManager.default.createFile(atPath: logPath, contents: nil)
+            let handle = FileHandle(forWritingAtPath: logPath)
+            func log(_ line: String) {
+                handle?.write((line + "\n").data(using: .utf8)!)
+                print(line)
+            }
+            Task { @MainActor in
+                guard #available(macOS 15.0, *) else {
+                    log("ERROR: 需要 macOS 15+")
+                    NSApp.terminate(nil)
+                    return
+                }
+                let pairs: [(String, String)] = [
+                    ("en", "zh-Hans"), ("zh-Hans", "en"),
+                    ("zh-Hant", "en"), ("ja", "zh-Hans"),
+                    ("en", "ja"), ("fr", "en"), ("en", "fr")
+                ]
+                let availability = LanguageAvailability()
+                for (from, to) in pairs {
+                    let raw = await availability.status(from: Locale.Language(identifier: from),
+                                                        to: Locale.Language(identifier: to))
+                    let label: String
+                    switch raw {
+                    case .installed: label = "已安装"
+                    case .supported: label = "系统支持但未下载"
+                    case .unsupported: label = "不支持"
+                    @unknown default: label = "未知"
+                    }
+                    log("PAIR \(from) -> \(to): \(label)")
+                }
+                let chinese = "这是一段测试文字，用来检查翻译功能。"
+                log("DETECT: \(AppleTranslateService.detect(chinese) ?? "nil")")
+                let traditional = "這是一段測試文字，用來檢查翻譯功能。"
+                log("DETECT(繁): \(AppleTranslateService.detect(traditional) ?? "nil")")
+                log("NAME(zh-Hant): \(AppLanguage.name(for: "zh-Hant")) / NAME(zh-Hans): \(AppLanguage.name(for: "zh-Hans"))")
+                do {
+                    let result = try await AppleTranslateService.shared.translate(chinese, to: "en")
+                    log("ZH->EN RESULT: \(result.text)  (检测到 \(result.source ?? "nil"))")
+                } catch {
+                    log("ZH->EN ERROR: \(error.localizedDescription)")
+                }
+
+                // 故意挑一个没装语言包的方向，确认失败会被正确归类，且不会卡很久
+                for target in ["fr", "th"] {
+                    let started = Date()
+                    do {
+                        let result = try await AppleTranslateService.shared.translate(chinese, to: target)
+                        log("ZH->\(target.uppercased()) RESULT: \(result.text)")
+                    } catch {
+                        let cost = String(format: "%.1f", Date().timeIntervalSince(started))
+                        log("ZH->\(target.uppercased()) ERROR(\(cost)s): \(error.localizedDescription)")
+                    }
+                }
+
+                // 失败后宿主被重建过，确认后续翻译仍然正常
+                do {
+                    let result = try await AppleTranslateService.shared.translate(chinese, to: "en")
+                    log("RECHECK ZH->EN: \(result.text)")
+                } catch {
+                    log("RECHECK ZH->EN ERROR: \(error.localizedDescription)")
+                }
+                handle?.closeFile()
                 NSApp.terminate(nil)
             }
             return

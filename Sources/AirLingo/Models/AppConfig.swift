@@ -216,6 +216,13 @@ private extension KeyedDecodingContainer {
 
 // MARK: - 语言
 
+enum AppInfo {
+    /// 从 Info.plist 读，避免界面上的版本号和安装包对不上。
+    static var version: String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.1"
+    }
+}
+
 struct AppLanguage: Identifiable, Hashable {
     let code: String
     let name: String
@@ -239,7 +246,13 @@ struct AppLanguage: Identifiable, Hashable {
     ]
 
     static func name(for code: String) -> String {
-        all.first(where: { $0.code == code })?.name ?? code
+        if let match = all.first(where: { $0.code == code }) { return match.name }
+        // 系统里中文会以 zh-Hans / zh-Hant 出现，界面上要显示成人看得懂的写法
+        let lower = code.lowercased()
+        if lower.hasPrefix("zh") {
+            return lower.contains("hant") || lower.contains("tw") || lower.contains("hk") ? "繁體中文" : "简体中文"
+        }
+        return code
     }
 
     static func base(_ code: String) -> String {

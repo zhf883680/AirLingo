@@ -17,7 +17,7 @@ enum AppleTranslateError: LocalizedError {
         case .unsupportedOS:
             return "系统翻译需要 macOS 15 或更高版本"
         case .needsDownload(let language):
-            return "系统还没安装\(language)语言包，请在「系统设置 › 通用 › 语言与地区 › 翻译语言」里添加后重试"
+            return "系统里还没就绪\(language)的语言包。请到「系统设置 › 通用 › 语言与地区 › 翻译语言」添加；如果已经装过，点弹窗上的「重试」或重启 AirLingo 让它重新加载"
         case .timeout:
             return "系统翻译超时，请重试"
         case .failed(let detail):
@@ -95,6 +95,9 @@ final class AppleTranslateService {
     private var current: Job?
     private var watchdog: Task<Void, Never>?
 
+    /// 最近一次失败的原始描述，用来在设置页显示真实原因而不是笼统的「失败」。
+    private(set) var lastFailure: String?
+
     private init() {}
 
     // MARK: 语言
@@ -112,7 +115,14 @@ final class AppleTranslateService {
         recognizer.processString(text)
         guard let language = recognizer.dominantLanguage else { return nil }
         let raw = language.rawValue
-        if raw.hasPrefix("zh") { return "zh" }
+        // 中文要保留简繁：繁體和簡體是两套独立的语言包，混为一谈会报「语言包未安装」。
+        if raw.lowercased().hasPrefix("zh") {
+            let lower = raw.lowercased()
+            if lower.contains("hant") || lower.contains("tw") || lower.contains("hk") {
+                return "zh-Hant"
+            }
+            return "zh-Hans"
+        }
         return AppLanguage.base(raw)
     }
 
@@ -122,23 +132,39 @@ final class AppleTranslateService {
 
     // MARK: 可用性
 
-    func status(for text: String?, target: String) async -> AppleLanguageStatus {
-        guard #available(macOS 15.0, *) else { return .unsupported }
-        let targetLang = Self.localeLanguage(target)
-        let availability = LanguageAvailability()
-        let raw: LanguageAvailability.Status
-        if let text, !text.isEmpty {
-            raw = (try? await availability.status(for: text, to: targetLang)) ?? .unsupported
-        } else {
-            let source = Self.localeLanguage(ConfigStore.shared.config.nativeLang)
-            raw = await availability.status(from: source, to: targetLang)
-        }
+    private static func map(_ raw: LanguageAvailability.Status) -> AppleLanguageStatus {
         switch raw {
         case .installed: return .installed
         case .supported: return .supported
         case .unsupported: return .unsupported
         @unknown default: return .unknown
         }
+    }
+
+    /// 指定语言对的包状态（不带文本，不依赖自动识别）。
+    func status(from source: String, to target: String) async -> AppleLanguageStatus {
+        guard #available(macOS 15.0, *) else { return .unsupported }
+        let availability = LanguageAvailability()
+        let raw = await availability.status(from: Self.localeLanguage(source),
+                                            to: Self.localeLanguage(target))
+        return Self.map(raw)
+    }
+
+    func status(for text: String?, target: String) async -> AppleLanguageStatus {
+        guard #available(macOS 15.0, *) else { return .unsupported }
+        let targetLang = Self.localeLanguage(target)
+        let availability = LanguageAvailability()
+        var raw: LanguageAvailability.Status?
+        if let text, !text.isEmpty {
+            // 用文本自动识别源语言；识别不出来（例如只有数字、单个符号）时退回语言对判断，
+            // 不能让「识别失败」直接变成「不支持」。
+            raw = try? await availability.status(for: text, to: targetLang)
+        }
+        if raw == nil {
+            let source = Self.localeLanguage(ConfigStore.shared.config.nativeLang)
+            raw = await availability.status(from: source, to: targetLang)
+        }
+        return Self.map(raw ?? .unsupported)
     }
 
     /// 打开系统设置里的「语言与地区」，用户在那里安装翻译语言包。
@@ -156,6 +182,7 @@ final class AppleTranslateService {
     func prepare(source: String?, target: String) async throws {
         guard #available(macOS 15.0, *) else { throw AppleTranslateError.unsupportedOS }
         NSApp.activate(ignoringOtherApps: true)
+        if current == nil { resetHost() }
         let sourceLang = source.map { Self.localeLanguage($0) }
         _ = try await run(text: "",
                           source: sourceLang,
@@ -176,19 +203,52 @@ final class AppleTranslateService {
 
         let sourceLang = detected.map { Self.localeLanguage($0) }
         let target = Self.localeLanguage(targetCode)
+        let state = await status(for: text, target: targetCode)
 
-        if await status(for: text, target: targetCode) != .installed {
-            // 先给系统一次安静安装的机会（已装好或系统愿意静默下载时会直接成功）。
-            _ = try? await run(text: "", source: sourceLang, target: target,
-                               prepareOnly: true, timeout: 12)
-            if await status(for: text, target: targetCode) != .installed {
-                throw AppleTranslateError.needsDownload(AppLanguage.name(for: targetCode))
+        if state == .installed {
+            // 状态说已就绪 → 直接翻
+            if let output = try? await run(text: text, source: sourceLang, target: target,
+                                           prepareOnly: false, timeout: 20) {
+                lastFailure = nil
+                return (output, detected)
             }
+            // 失败一次：重建承载 .translationTask 的宿主窗口再试
+            resetHost()
+            if let output = try? await run(text: text, source: sourceLang, target: target,
+                                           prepareOnly: false, timeout: 20) {
+                lastFailure = nil
+                return (output, detected)
+            }
+            lastFailure = "会话已重建仍失败"
+            throw AppleTranslateError.failed(lastFailure ?? "未知错误")
         }
 
-        let result = try await run(text: text, source: sourceLang, target: target,
-                                   prepareOnly: false, timeout: 60)
-        return (result, detected)
+        // 状态说「没装」。但这个判断在进程内会缓存——用户不重启应用就装了语言包时它仍是旧值，
+        // 所以不能直接报错，先用短超时真刀真枪试一次（真装了的话通常 1 秒内就返回）。
+        if let output = try? await run(text: text, source: sourceLang, target: target,
+                                       prepareOnly: false, timeout: 6) {
+            lastFailure = nil
+            return (output, detected)
+        }
+        resetHost()
+        if let output = try? await run(text: text, source: sourceLang, target: target,
+                                       prepareOnly: false, timeout: 12) {
+            lastFailure = nil
+            return (output, detected)
+        }
+
+        lastFailure = "语言包未就绪"
+        NSLog("AirLingo: 系统翻译不可用 \(targetCode)，状态 \(state.title)")
+        throw AppleTranslateError.needsDownload(AppLanguage.name(for: targetCode))
+    }
+
+    /// 丢掉宿主窗口与缓存，让下一次翻译重新建立 TranslationSession。
+    func resetHost() {
+        hostWindow?.orderOut(nil)
+        hostWindow = nil
+        hostModel.handler = nil
+        hostModel.configuration = nil
+        queue.removeAll()
     }
 
     // MARK: 任务队列

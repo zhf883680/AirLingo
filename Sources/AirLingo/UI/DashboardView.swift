@@ -96,7 +96,7 @@ struct DashboardView: View {
                 Text("⌃⌃ 双击 Control 划词翻译")
                     .font(.system(size: 10.5))
                     .foregroundStyle(Theme.fgSoft.opacity(0.75))
-                Text("v1.0.0")
+                Text("v\(AppInfo.version)")
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.fgSoft.opacity(0.45))
             }

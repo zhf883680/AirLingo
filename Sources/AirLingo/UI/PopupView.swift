@@ -325,12 +325,27 @@ struct PopupView: View {
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.fgSoft)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("重试") { Task { await model.run() } }
-                .buttonStyle(.plain)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.brandLite)
-                .padding(.top, 2)
-                .contentShape(Rectangle())
+            HStack(spacing: 14) {
+                Button("重试") { Task { await model.run() } }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.brandLite)
+                    .contentShape(Rectangle())
+
+                // 语言包相关的失败，直接给一条去系统设置的捷径
+                if error.contains("语言包") {
+                    Button("打开系统设置") {
+                        if #available(macOS 15.0, *) {
+                            AppleTranslateService.shared.openLanguageSettings()
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.fgSoft)
+                    .contentShape(Rectangle())
+                }
+            }
+            .padding(.top, 2)
         }
         .padding(.horizontal, PopupLayout.inset)
         .padding(.vertical, 16)
