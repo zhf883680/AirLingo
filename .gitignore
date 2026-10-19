@@ -1,0 +1,15 @@
+# macOS 缓存与构建产物
+build/
+dist/
+.DS_Store
+
+# 本地自签证书（私钥绝不入库）
+scripts/signing/
+*.p12
+*.pem
+*.key
+
+# Xcode
+*.xcodeproj/
+xcuserdata/
+.swiftpm/
