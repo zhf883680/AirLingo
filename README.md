@@ -10,6 +10,7 @@ macOS 菜单栏划词翻译工具，SwiftUI + AppKit 原生实现。
 
 | | |
 |---|---|
+| 主动翻译 | 独立悬浮弹窗，粘贴整段文字，自动判断目标语言，可切换引擎、朗读与收藏 |
 | 划词翻译 | 双击修饰键或组合键，读取选区文字并在光标旁浮窗显示译文 |
 | 静默替换 | 译文直接写回输入框，不弹窗 |
 | 截图翻译 | 框选屏幕区域，Vision 取字后翻译 |
@@ -125,6 +126,8 @@ Sources/AirLingo/
     DashboardView.swift    控制台窗口
     Panes.swift            引擎 / 快捷键设置页
     PopupView.swift        划词浮窗
+    TranslatePane.swift    主动翻译弹窗（输入 / 译文 / 引擎切换）
+    TranslateWindow.swift  主动翻译弹窗的悬浮窗口控制
     HUD.swift              轻提示
     Theme.swift            配色
     HotkeyRecorder.swift   快捷键录制
@@ -142,6 +145,8 @@ scripts/
 ```bash
 AirLingo --snapshot out.png engines 900    # 渲染设置页
 AirLingo --popup-live-test /tmp/out        # 真实弹出浮窗 + 真实翻译，输出尺寸/命中测试
+AirLingo --translate-snapshot /tmp/out.png # 主动翻译弹窗排版（带示例译文）
+AirLingo --translate-popup-test /tmp/out   # 弹窗内粘贴 + ⌘↵ 真实翻译
 AirLingo --compare-test /tmp/out           # 对比翻译
 AirLingo --ocr-test /tmp/out               # 坐标映射 + 已知文字抓取
 AirLingo --ocr-drag-test /tmp/out          # 模拟拖拽框选，走完整截图翻译链路

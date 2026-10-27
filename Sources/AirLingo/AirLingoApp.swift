@@ -61,6 +61,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // 命令行自检：AirLingo --translate-snapshot <path>（带译文，检查主动翻译弹窗排版）
+        if let index = CommandLine.arguments.firstIndex(of: "--translate-snapshot"),
+           index + 1 < CommandLine.arguments.count {
+            let path = CommandLine.arguments[index + 1]
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                MainActor.assumeIsolated { Self.renderTranslateSnapshot(to: path) }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+
         // 命令行自检：AirLingo --ui-record-test <目录>
         // 切到快捷键页 → 点第一个键位 → 真按一次 ⌥⌘K → 截图看是否录进去
         if let index = CommandLine.arguments.firstIndex(of: "--ui-record-test"),
@@ -155,6 +166,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 Self.snapshotWindow(window, to: "\(dir)/ui-after.png")
                 print("CLICK at \(cgPoint) window=\(frame)")
+                NSApp.terminate(nil)
+            }
+            return
+        }
+
+        // 命令行自检：AirLingo --translate-popup-test <目录>
+        // 打开主动翻译弹窗 → ⌘V 粘贴 → ⌘↵ 翻译，检查译文和历史是否真的写入
+        if let index = CommandLine.arguments.firstIndex(of: "--translate-popup-test"),
+           index + 1 < CommandLine.arguments.count {
+            let dir = CommandLine.arguments[index + 1]
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            Task { @MainActor in
+                let startedAt = Date()
+                TranslateWindowController.shared.show()
+                try? await Task.sleep(nanoseconds: 900_000_000)
+                guard let window = NSApp.windows.first(where: { $0 is FloatingPanel && $0.isVisible }) else {
+                    NSApp.terminate(nil)
+                    return
+                }
+
+                let sample = "保存策略占用了内存，需要确认影响范围。"
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(sample, forType: .string)
+                NSApp.activate(ignoringOtherApps: true)
+                try? await Task.sleep(nanoseconds: 300_000_000)
+
+                let source = CGEventSource(stateID: .hidSystemState)
+                func press(_ code: CGKeyCode, flags: CGEventFlags = []) {
+                    let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true)
+                    down?.flags = flags
+                    down?.post(tap: .cghidEventTap)
+                    usleep(60_000)
+                    let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false)
+                    up?.flags = flags
+                    up?.post(tap: .cghidEventTap)
+                }
+
+                press(9, flags: .maskCommand)                     // ⌘V
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                Self.snapshotWindow(window, to: "\(dir)/translate-typed.png")
+
+                press(36, flags: .maskCommand)                    // ⌘↵
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                Self.snapshotWindow(window, to: "\(dir)/translate-after.png")
+
+                let fresh = HistoryStore.shared.items.filter { $0.date >= startedAt }
+                if let item = fresh.first {
+                    print("TRANSLATE_PAGE ok source=\(item.source) target=\(item.target)")
+                } else {
+                    print("TRANSLATE_PAGE no-history item=\(String(describing: HistoryStore.shared.items.first))")
+                }
+                // 自检产生的记录不留在用户历史里。
+                fresh.forEach { HistoryStore.shared.remove($0.id) }
+
+                press(53)                                         // Esc
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                print("TRANSLATE_PAGE esc_closed=\(!window.isVisible)")
                 NSApp.terminate(nil)
             }
             return
@@ -698,6 +766,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         print("POPUP_SIZE \(Int(size.width))x\(Int(size.height)) -> \(path)")
     }
 
+    @MainActor
+    private static func renderTranslateSnapshot(to path: String) {
+        let view = ZStack {
+            Theme.bg
+            TranslatePane(
+                source: "保存策略的时候占用了内存，这个是部门策略的关系，需要确认影响范围。改完之后记得回归一下划词和截图两套流程。",
+                output: "When saving the policy, memory usage spikes. This is related to the department policy, so the scope of impact needs to be confirmed. After the change, remember to regression-test both the selection and screenshot flows.",
+                detected: "zh-CN",
+                target: "en",
+                engineID: "google"
+            )
+            .environmentObject(ConfigStore.shared)
+        }
+        .preferredColorScheme(.dark)
+
+        let hosting = NSHostingView(rootView: view)
+        hosting.appearance = NSAppearance(named: .darkAqua)
+        hosting.layoutSubtreeIfNeeded()
+        let fit = hosting.fittingSize
+        hosting.frame = NSRect(origin: .zero, size: NSSize(width: ceil(fit.width), height: ceil(fit.height)))
+        hosting.layoutSubtreeIfNeeded()
+
+        guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { return }
+        hosting.cacheDisplay(in: hosting.bounds, to: rep)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return }
+        try? data.write(to: URL(fileURLWithPath: path))
+        print("TRANSLATE_SNAPSHOT \(Int(hosting.bounds.width))x\(Int(hosting.bounds.height)) -> \(path)")
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
@@ -713,6 +810,12 @@ struct MenuBarMenu: View {
 
     var body: some View {
         Group {
+            Button("主动翻译…") {
+                TranslateWindowController.shared.show()
+            }
+
+            Divider()
+
             Button("划词翻译  \(HotkeyCenter.describe(store.config.shortcuts.translate))") {
                 AppController.shared.translateSelection()
             }
